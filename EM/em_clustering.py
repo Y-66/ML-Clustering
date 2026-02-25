@@ -1,171 +1,166 @@
-# =====================================================
-# EM TEXT CLUSTERING PIPELINE
-# Gaussian Mixture Model (Expectation-Maximization)
-# =====================================================
+############################################################
+# IMPORTS
+############################################################
 import matplotlib
-matplotlib.use('Agg') # 强制使用非交互式后端，直接保存图片而不弹出窗口
-import matplotlib.pyplot as plt
+matplotlib.use('TkAgg')
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import TruncatedSVD
 from sklearn.mixture import GaussianMixture
+from sklearn.metrics import silhouette_score, cohen_kappa_score
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import cohen_kappa_score, silhouette_score
-from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import CountVectorizer
+from scipy.cluster.hierarchy import linkage, dendrogram
+
+from gensim.models import Word2Vec
+from gensim.corpora import Dictionary
+from gensim.models.coherencemodel import CoherenceModel
 
 
-# =====================================================
-# 1. LOAD DATA
-# =====================================================
+############################################################
+# MAIN PIPELINE
+############################################################
 
-# ⚠️ Put processed_data.csv in SAME folder as this file
-DATA_PATH = "processed_data.csv"
+def main():
 
-df = pd.read_csv(DATA_PATH)
+    ########################################################
+    # LOAD DATA
+    ########################################################
 
-texts = df["Cleaned_Content"].astype(str)
-labels = df["Label"]
+    data = pd.read_csv("processed_data.csv")
 
-print("Dataset size:", len(df))
+    texts = data["Cleaned_Content"].astype(str)
+    true_labels = data["Label"]
 
+    tokenized_texts = [doc.split() for doc in texts]
 
-# =====================================================
-# 2. FEATURE ENGINEERING — TF-IDF
-# =====================================================
+    ########################################################
+    # WORD2VEC
+    ########################################################
 
-print("\nCreating TF-IDF features...")
+    print("Training Word2Vec...")
 
-tfidf = TfidfVectorizer(
-    max_features=3000,
-    stop_words="english",
-    ngram_range=(1, 2),   # unigram + bigram
-    min_df=3,
-    max_df=0.8
-)
+    w2v_model = Word2Vec(
+        sentences=tokenized_texts,
+        vector_size=100,
+        window=5,
+        min_count=2,
+        workers=4
+    )
 
-X_tfidf = tfidf.fit_transform(texts)
+    def document_vector(tokens):
+        vectors = [
+            w2v_model.wv[word]
+            for word in tokens
+            if word in w2v_model.wv
+        ]
+        if len(vectors) == 0:
+            return np.zeros(100)
 
-print("TFIDF Shape:", X_tfidf.shape)
+        return np.mean(vectors, axis=0)
 
+    X = np.array([document_vector(doc) for doc in tokenized_texts])
 
-# =====================================================
-# 3. DIMENSION REDUCTION (IMPORTANT FOR EM)
-# =====================================================
+    ########################################################
+    # EM CLUSTERING
+    ########################################################
 
-print("\nApplying SVD dimensionality reduction...")
+    n_clusters = len(np.unique(true_labels))
 
-svd = TruncatedSVD(
-    n_components=100,
-    random_state=42
-)
+    gmm = GaussianMixture(
+        n_components=n_clusters,
+        random_state=42
+    )
 
-X_reduced = svd.fit_transform(X_tfidf)
+    pred_clusters = gmm.fit_predict(X)
 
-print("Reduced Shape:", X_reduced.shape)
+    ########################################################
+    # SILHOUETTE
+    ########################################################
 
+    sil = silhouette_score(X, pred_clusters)
+    print("Silhouette:", sil)
 
-# =====================================================
-# 4. EM CLUSTERING (Gaussian Mixture Model)
-# =====================================================
+    ########################################################
+    # KAPPA
+    ########################################################
 
-print("\nRunning EM Clustering...")
+    encoder = LabelEncoder()
+    true_encoded = encoder.fit_transform(true_labels)
 
-n_clusters = len(np.unique(labels))
+    kappa = cohen_kappa_score(true_encoded, pred_clusters)
+    print("Kappa:", kappa)
 
-gmm = GaussianMixture(
-    n_components=n_clusters,
-    covariance_type="full",
-    random_state=42,
-    n_init=10
-)
+    ########################################################
+    # COHERENCE  ✅ FIXED
+    ########################################################
 
-gmm.fit(X_reduced)
+    dictionary = Dictionary(tokenized_texts)
 
-clusters = gmm.predict(X_reduced)
-probabilities = gmm.predict_proba(X_reduced)
+    cluster_topics = []
 
-df["Cluster"] = clusters
+    for c in range(n_clusters):
 
+        cluster_docs = [
+            texts.iloc[i]
+            for i in range(len(pred_clusters))
+            if pred_clusters[i] == c
+        ]
 
-# =====================================================
-# 5. EVALUATION
-# =====================================================
+        vectorizer = CountVectorizer(
+            stop_words="english",
+            max_features=10
+        )
 
-print("\n===== Evaluation =====")
+        if len(cluster_docs) > 0:
+            X_counts = vectorizer.fit_transform(cluster_docs)
+            words = vectorizer.get_feature_names_out()
+            cluster_topics.append(list(words))
 
-le = LabelEncoder()
-true_labels = le.fit_transform(labels)
+    coherence_model = CoherenceModel(
+        topics=cluster_topics,
+        texts=tokenized_texts,
+        dictionary=dictionary,
+        coherence='c_v'
+    )
 
-# ---- Cohen Kappa ----
-kappa = cohen_kappa_score(true_labels, clusters)
-print("Cohen Kappa Score:", round(kappa, 4))
+    coherence = coherence_model.get_coherence()
+    print("Coherence:", coherence)
 
-# ---- Silhouette ----
-sil = silhouette_score(X_reduced, clusters)
-print("Silhouette Score:", round(sil, 4))
+    ########################################################
+    # PCA VISUALIZATION
+    ########################################################
 
-print("\nCluster Distribution:")
-print(pd.Series(clusters).value_counts())
-# =====================================================
+    pca = PCA(n_components=2)
+    X_2d = pca.fit_transform(X)
 
+    plt.figure(figsize=(8,6))
+    sns.scatterplot(
+        x=X_2d[:,0],
+        y=X_2d[:,1],
+        hue=pred_clusters
+    )
+    plt.title("EM Clustering")
+    plt.show()
 
+    ########################################################
+    # DENDROGRAM
+    ########################################################
 
-# =====================================================
-# 7. ERROR ANALYSIS
-# =====================================================
+    linked = linkage(X[:200], method='ward')
 
-print("\n===== Error Analysis =====")
-
-df["True_Label"] = true_labels
-
-errors = df[df["True_Label"] != df["Cluster"]]
-
-print("Misclustered samples:", len(errors))
-
-# ---- EM confidence ----
-confidence = probabilities.max(axis=1)
-df["Confidence"] = confidence
-
-uncertain_docs = df[df["Confidence"] < 0.4]
-
-print("Low-confidence documents:", len(uncertain_docs))
-
-
-# ---- Frequent confusing words ----
-print("\nTop words causing confusion:")
-
-vec = CountVectorizer(
-    stop_words="english",
-    max_features=1000
-)
-
-X_err = vec.fit_transform(errors["Cleaned_Content"])
-
-word_freq = np.asarray(X_err.sum(axis=0)).flatten()
-words = vec.get_feature_names_out()
-
-top_words = sorted(
-    zip(words, word_freq),
-    key=lambda x: x[1],
-    reverse=True
-)[:10]
-
-for w, f in top_words:
-    print(w, f)
+    plt.figure(figsize=(10,6))
+    dendrogram(linked, truncate_mode='level', p=5)
+    plt.title("Dendrogram")
+    plt.show()
 
 
-# =====================================================
-# 8. SAVE RESULTS
-# =====================================================
+############################################################
+# WINDOWS SAFE ENTRY POINT ⭐⭐⭐⭐⭐
+############################################################
 
-df.to_csv("EM_results.csv", index=False)
-
-print("\n✅ Pipeline Finished Successfully!")
-print("Generated files:")
-print(" - EM_clusters.png")
-print(" - True_labels.png")
-print(" - EM_results.csv")
+if __name__ == "__main__":
+    main()
