@@ -1,32 +1,25 @@
 ############################################################
-# EM (GMM) TEXT CLUSTERING USING WORD2VEC (FULL VERSION)
+# EM (GMM) TEXT CLUSTERING USING TF-IDF (OPTIMIZED VERSION)
 ############################################################
 
 import matplotlib
-matplotlib.use('TkAgg')
+matplotlib.use("TkAgg")
 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score, cohen_kappa_score, confusion_matrix
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.decomposition import PCA
-from sklearn.feature_extraction.text import CountVectorizer
 from scipy.cluster.hierarchy import linkage, dendrogram
 
-from gensim.models import Word2Vec
 from gensim.corpora import Dictionary
 from gensim.models.coherencemodel import CoherenceModel
 
-from matplotlib.patches import Ellipse
-
-
-############################################################
-# MAIN PIPELINE
-############################################################
 
 def main():
 
@@ -44,30 +37,33 @@ def main():
     print("Dataset size:", len(texts))
 
     ########################################################
-    # WORD2VEC FEATURE ENGINEERING
+    # TF-IDF FEATURE ENGINEERING
     ########################################################
 
-    print("\nTraining Word2Vec...")
-
-    w2v_model = Word2Vec(
-        sentences=tokenized_texts,
-        vector_size=100,
-        window=5,
-        min_count=2,
-        workers=4
+    tfidf = TfidfVectorizer(
+        max_features=5000,
+        stop_words='english',
+        ngram_range=(1,2),
+        min_df=5,
+        max_df=0.7,
+        sublinear_tf=True
     )
 
-    def document_vector(tokens):
-        vectors = [
-            w2v_model.wv[word]
-            for word in tokens
-            if word in w2v_model.wv
-        ]
-        if len(vectors) == 0:
-            return np.zeros(100)
-        return np.mean(vectors, axis=0)
+    X = tfidf.fit_transform(texts).toarray()
 
-    X = np.array([document_vector(doc) for doc in tokenized_texts])
+    print("TF-IDF Shape:", X.shape)
+
+    ########################################################
+    # SCALING + PCA (IMPORTANT FOR GMM)
+    ########################################################
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    pca = PCA(n_components=100, random_state=42)
+    X_reduced = pca.fit_transform(X_scaled)
+
+    print("Reduced Shape:", X_reduced.shape)
 
     ########################################################
     # EM / GMM
@@ -77,41 +73,41 @@ def main():
 
     gmm = GaussianMixture(
         n_components=n_clusters,
-        covariance_type='full',
+        covariance_type='diag',   # improved stability
         random_state=42
     )
 
-    pred_clusters = gmm.fit_predict(X)
+    pred_clusters = gmm.fit_predict(X_reduced)
 
     ########################################################
     # EVALUATION
     ########################################################
 
-    sil = silhouette_score(X, pred_clusters)
-    print("Silhouette:", sil)
+    sil = silhouette_score(X_reduced, pred_clusters)
+    print("Silhouette Score:", sil)
 
     encoder = LabelEncoder()
     true_encoded = encoder.fit_transform(true_labels)
 
     kappa = cohen_kappa_score(true_encoded, pred_clusters)
-    print("Kappa:", kappa)
+    print("Kappa Score:", kappa)
 
     ########################################################
-    # CONFUSION MATRIX
+    # CONFUSION MATRIX (7.1 Disagreement Analysis)
     ########################################################
 
     cm = confusion_matrix(true_encoded, pred_clusters)
 
     plt.figure(figsize=(8,6))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-    plt.title("Confusion Matrix - Word2Vec GMM")
+    plt.title("Confusion Matrix - GMM (TF-IDF)")
     plt.xlabel("Predicted Cluster")
     plt.ylabel("True Label")
-    plt.savefig("Confusion_Matrix_Word2Vec.png", dpi=300)
+    plt.savefig("Confusion_Matrix_TFIDF.png", dpi=300)
     plt.close()
 
     ########################################################
-    # COHERENCE
+    # COHERENCE SCORE
     ########################################################
 
     dictionary = Dictionary(tokenized_texts)
@@ -141,81 +137,41 @@ def main():
     )
 
     coherence = coherence_model.get_coherence()
-    print("Coherence:", coherence)
+    print("Coherence Score:", coherence)
 
     ########################################################
-    # PCA FOR VISUALIZATION
+    # PCA (2D) FOR VISUALIZATION
     ########################################################
 
-    pca = PCA(n_components=2, random_state=42)
-    X_2d = pca.fit_transform(X)
+    pca_vis = PCA(n_components=2, random_state=42)
+    X_vis = pca_vis.fit_transform(X_reduced)
 
     plt.figure(figsize=(8,6))
-    plt.scatter(
-        X_2d[:,0],
-        X_2d[:,1],
+    scatter = plt.scatter(
+        X_vis[:,0],
+        X_vis[:,1],
         c=pred_clusters,
         cmap="viridis",
         s=25
     )
 
-    plt.title("GMM Clustering (Word2Vec)")
+    plt.title("GMM Clustering (TF-IDF + PCA)")
     plt.xlabel("Component 1")
     plt.ylabel("Component 2")
-
-    ########################################################
-    # GAUSSIAN ELLIPSES
-    ########################################################
-
-    def draw_ellipse(position, covariance):
-
-        if covariance.shape == (2,2):
-            U, s, Vt = np.linalg.svd(covariance)
-            angle = np.degrees(np.arctan2(U[1,0], U[0,0]))
-            width, height = 2*np.sqrt(s)
-        else:
-            angle = 0
-            width, height = 2*np.sqrt(covariance)
-
-        for nsig in range(1,4):
-            plt.gca().add_patch(
-                Ellipse(
-                    position,
-                    nsig*width,
-                    nsig*height,
-                    angle=angle,
-                    fill=False,
-                    linewidth=2
-                )
-            )
-
-    for i in range(gmm.n_components):
-
-        mean_2d = pca.transform(
-            gmm.means_[i].reshape(1,-1)
-        )[0]
-
-        cov_2d = (
-            pca.components_
-            @ gmm.covariances_[i]
-            @ pca.components_.T
-        )
-
-        draw_ellipse(mean_2d, cov_2d)
-
-    plt.savefig("Word2Vec_GMM_Clustering.png", dpi=300)
+    plt.colorbar(scatter)
+    plt.savefig("TFIDF_GMM_Clustering.png", dpi=300)
     plt.close()
 
     ########################################################
     # DENDROGRAM
     ########################################################
 
-    linked = linkage(X[:200], method='ward')
+    linked = linkage(X_reduced[:200], method='ward')
 
     plt.figure(figsize=(10,6))
     dendrogram(linked, truncate_mode="level", p=5)
-    plt.title("Hierarchical Dendrogram (Word2Vec)")
-    plt.savefig("Dendrogram_Word2Vec.png", dpi=300)
+    plt.title("Hierarchical Dendrogram (TF-IDF)")
+    plt.savefig("Dendrogram_TFIDF.png", dpi=300)
     plt.close()
 
     ########################################################
@@ -243,12 +199,8 @@ def main():
         print("Top confusing words:")
         print(vectorizer.get_feature_names_out())
 
-    print("\n===== WORD2VEC PIPELINE FINISHED =====")
+    print("\n===== PIPELINE FINISHED SUCCESSFULLY =====")
 
-
-############################################################
-# WINDOWS SAFE ENTRY
-############################################################
 
 if __name__ == "__main__":
     main()
